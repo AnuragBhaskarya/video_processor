@@ -1,7 +1,7 @@
 services:
   - type: web
     name: video_processor
-    env: python
+    env: python==3.11.*
     buildCommand: pip install -r requirements.txt
     startCommand: gunicorn main:app --workers=1 --bind=0.0.0.0:5000
     envVars:
