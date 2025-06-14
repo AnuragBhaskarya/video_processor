@@ -2,20 +2,19 @@ import os
 import subprocess
 import logging
 from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
-from telegram.ext.webhook import WebhookRequestHandler
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
 from yt_dlp import YoutubeDL
 import uuid
 from flask import Flask, request, jsonify
+import threading
+import asyncio
 from concurrent.futures import ThreadPoolExecutor
 import time
 import requests
 from dotenv import load_dotenv
-import asyncio
-
 load_dotenv()
 
-# Logging
+# Configure logging
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
@@ -23,12 +22,11 @@ logging.basicConfig(
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 MY_CHAT_ID = os.getenv("MY_CHAT_ID")
-WEBHOOK_DOMAIN = os.getenv("WEBHOOK_DOMAIN")  # e.g. your-app-name.onrender.com
 
 app = Flask(__name__)
 executor = ThreadPoolExecutor(max_workers=3)
 
-# Download video
+# Download video using yt-dlp
 def download_video(url, download_path):
     ydl_opts = {
         'outtmpl': download_path,
@@ -40,7 +38,7 @@ def download_video(url, download_path):
     with YoutubeDL(ydl_opts) as ydl:
         ydl.download([url])
 
-# Process video
+# Process video with FFmpeg
 def process_video(input_path, output_path):
     try:
         result = subprocess.run(
@@ -97,6 +95,7 @@ def process_video(input_path, output_path):
         logging.error(f"FFmpeg processing failed: {e}")
         raise
 
+# Telegram message
 def send_telegram_message(text):
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
@@ -107,6 +106,7 @@ def send_telegram_message(text):
         logging.error(f"Failed to send message: {e}")
         return False
 
+# Send Telegram video
 def send_telegram_video(video_path):
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendVideo"
@@ -118,6 +118,7 @@ def send_telegram_video(video_path):
         logging.error(f"Failed to send video: {e}")
         return False
 
+# Combined flow
 def process_and_send_video_sync(instagram_url, source="API"):
     send_telegram_message(f'🔥 Processing your video from {source}...\nURL: {instagram_url}')
     unique_id = str(uuid.uuid4())
@@ -141,7 +142,7 @@ def process_and_send_video_sync(instagram_url, source="API"):
                 except Exception as cleanup_error:
                     logging.error(f"Cleanup failed: {cleanup_error}")
 
-# Flask Endpoints
+# Flask endpoints
 @app.route('/process_instagram', methods=['GET', 'POST'])
 def api_process_instagram():
     if request.method == 'POST':
@@ -161,20 +162,19 @@ def api_process_instagram():
     if not instagram_url.startswith('http'):
         return jsonify({'error': 'Invalid Instagram URL format'}), 400
 
+    # Process in background thread
     executor.submit(process_and_send_video_sync, instagram_url, f"API-{request.method}")
+    
     return jsonify({'message': 'Video processing started successfully'}), 200
 
 @app.route('/healthz', methods=['GET'])
-@app.route('/health', methods=['GET'])
 def health_check():
-    return jsonify({'status': 'healthy', 'timestamp': time.time()}), 200
+    return jsonify({
+        'status': 'healthy',
+        'timestamp': time.time()
+    }), 200
 
-@app.route('/webhook', methods=['POST'])
-async def telegram_webhook():
-    await application.update_queue.put(Update.de_json(await request.get_json(), application.bot))
-    return jsonify({'status': 'ok'}), 200
-
-# Telegram Bot Handlers
+# Telegram bot commands
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "👋 Welcome to InstaCropBot!\nSend an Instagram video URL to process."
@@ -187,15 +187,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await update.message.reply_text("🔥 Processing your video...")
-    executor.submit(process_and_send_video_sync, url, "Telegram")
+    process_and_send_video_sync(url, "Telegram")
 
-# Initialize bot
-application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-application.add_handler(CommandHandler("start", start))
-application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
-# Entry point for Render
-if __name__ == '__main__':
-    webhook_url = f"https://{WEBHOOK_DOMAIN}/webhook"
-    asyncio.run(application.bot.set_webhook(webhook_url))
+# Run Flask in thread
+def run_flask_app():
     app.run(host='0.0.0.0', port=5000)
+
+# Main bot logic
+def main():
+    application = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
+    threading.Thread(target=run_flask_app, daemon=True).start()
+    application.run_polling()
+
+if __name__ == '__main__':
+    main()
