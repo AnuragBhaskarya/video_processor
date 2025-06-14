@@ -1,5 +1,6 @@
-Flask
 python-telegram-bot==20.7
 yt-dlp
+Flask
 requests
+python-dotenv
 gunicorn
