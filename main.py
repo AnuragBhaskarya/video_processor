@@ -12,6 +12,8 @@ from concurrent.futures import ThreadPoolExecutor
 import time
 import requests
 from dotenv import load_dotenv
+import glob
+
 load_dotenv()
 
 # Configure logging
@@ -27,16 +29,24 @@ app = Flask(__name__)
 executor = ThreadPoolExecutor(max_workers=3)
 
 # Download video using yt-dlp
-def download_video(url, download_path):
+def download_video(url, unique_id):
     ydl_opts = {
-        'outtmpl': download_path,
+        'outtmpl': f'{unique_id}.%(ext)s',
         'format': 'bestvideo+bestaudio/best',
         'quiet': True,
         'merge_output_format': 'mp4',
-        'cookies': 'cookies.txt'
     }
+    if os.path.exists('cookies.txt'):
+        ydl_opts['cookies'] = 'cookies.txt'
+
     with YoutubeDL(ydl_opts) as ydl:
         ydl.download([url])
+    
+    # Find the downloaded file (e.g., .mp4, .webm)
+    matches = glob.glob(f"{unique_id}.*")
+    if not matches:
+        raise FileNotFoundError("Downloaded file not found")
+    return matches[0]
 
 # Process video with FFmpeg
 def process_video(input_path, output_path):
@@ -91,8 +101,11 @@ def process_video(input_path, output_path):
         ]
 
         subprocess.run(command, capture_output=True, text=True, check=True)
+    except subprocess.CalledProcessError as e:
+        logging.error(f"FFmpeg failed:\nSTDOUT: {e.stdout}\nSTDERR: {e.stderr}")
+        raise
     except Exception as e:
-        logging.error(f"FFmpeg processing failed: {e}")
+        logging.error(f"FFmpeg processing error: {e}")
         raise
 
 # Telegram message
@@ -122,31 +135,32 @@ def send_telegram_video(video_path):
 def process_and_send_video_sync(instagram_url, source="API"):
     send_telegram_message(f'🔥 Processing your video from {source}...\nURL: {instagram_url}')
     unique_id = str(uuid.uuid4())
-    download_path = f'{unique_id}.mp4'
-    processed_path = f'{unique_id}_processed.mp4'
 
     try:
-        download_video(instagram_url, download_path)
-        process_video(download_path, processed_path)
+        input_path = download_video(instagram_url, unique_id)
+        processed_path = f'{unique_id}_processed.mp4'
+        process_video(input_path, processed_path)
+
         if send_telegram_video(processed_path):
             send_telegram_message('✅ Done! Video processed successfully.')
         else:
             send_telegram_message('⚠️ Video processed but failed to send.')
+
     except Exception as e:
         send_telegram_message(f'⚠️ An error occurred: {str(e)}')
     finally:
-        for file_path in [download_path, processed_path]:
+        for file_path in glob.glob(f"{unique_id}*"):
             if os.path.exists(file_path):
                 try:
                     os.remove(file_path)
                 except Exception as cleanup_error:
-                    logging.error(f"Cleanup failed: {cleanup_error}")
+                    logging.error(f"Cleanup failed for {file_path}: {cleanup_error}")
 
 # Flask endpoints
 @app.route('/process_instagram', methods=['GET', 'POST'])
 def api_process_instagram():
     if request.method == 'POST':
-        data = request.get_json()
+        data = request.get_json(force=True, silent=True)
         if not data or 'url' not in data:
             return jsonify({'error': 'Missing Instagram URL in request'}), 400
         instagram_url = data['url']
@@ -162,9 +176,7 @@ def api_process_instagram():
     if not instagram_url.startswith('http'):
         return jsonify({'error': 'Invalid Instagram URL format'}), 400
 
-    # Process in background thread
     executor.submit(process_and_send_video_sync, instagram_url, f"API-{request.method}")
-    
     return jsonify({'message': 'Video processing started successfully'}), 200
 
 @app.route('/health', methods=['GET'])
