@@ -1,0 +1,5 @@
+Flask
+python-telegram-bot==20.7
+yt-dlp
+requests
+gunicorn
