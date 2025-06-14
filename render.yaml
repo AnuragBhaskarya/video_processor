@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: insta-cropper-bot
+    name: video_processor
     env: python
     buildCommand: pip install -r requirements.txt
     startCommand: gunicorn main:app --workers=1 --bind=0.0.0.0:5000
